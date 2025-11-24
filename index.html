@@ -3,276 +3,215 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>AI 表情大挑戰</title>
+    <title>On-Device 物件偵測</title>
     <style>
-        body { margin: 0; background: #2c3e50; font-family: 'Segoe UI', sans-serif; overflow: hidden; display: flex; flex-direction: column; align-items: center; }
+        body { margin: 0; background: #000; font-family: 'Courier New', Courier, monospace; overflow: hidden; }
         
-        /* 遊戲區域 */
-        #game-container {
-            position: relative;
-            width: 100vw; height: 100vh;
-            overflow: hidden;
-        }
-
-        /* 視訊層 (鏡像) */
+        #container { position: relative; width: 100vw; height: 100vh; }
+        
+        /* 視訊層 */
         video {
             position: absolute; top: 0; left: 0; width: 100%; height: 100%;
-            object-fit: cover; transform: scaleX(-1);
+            object-fit: cover;
         }
 
-        /* UI 層 */
-        #ui-layer {
+        /* 繪圖層 (Box & Label) */
+        canvas {
             position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            z-index: 10;
+        }
+
+        /* 終結者風格 UI - 數據面板 */
+        #hud-layer {
+            position: absolute; top: 20px; left: 20px; z-index: 20;
+            color: #00ff00; text-shadow: 0 0 5px #00ff00;
             pointer-events: none;
-            display: flex; flex-direction: column; align-items: center; justify-content: space-between;
-            padding: 20px 0;
         }
 
-        /* 目標 Emoji 顯示 */
-        #target-emoji {
-            font-size: 120px;
-            margin-top: 50px;
-            filter: drop-shadow(0 0 20px rgba(0,0,0,0.5));
-            animation: pop 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+        .hud-item { margin-bottom: 5px; font-size: 14px; font-weight: bold; }
+        .hud-value { color: #fff; }
+
+        /* 掃描線特效 */
+        #scan-line {
+            position: absolute; top: 0; left: 0; width: 100%; height: 5px;
+            background: rgba(0, 255, 0, 0.5);
+            box-shadow: 0 0 10px #00ff00;
+            animation: scan 3s linear infinite;
+            z-index: 5; opacity: 0.3;
+            pointer-events: none;
         }
 
-        /* 分數與倒數 */
-        .status-bar {
-            background: rgba(0, 0, 0, 0.6);
-            color: white;
-            padding: 10px 30px;
-            border-radius: 50px;
-            font-size: 24px;
-            font-weight: bold;
-            display: flex; gap: 20px;
-            backdrop-filter: blur(5px);
+        @keyframes scan {
+            0% { top: 0%; }
+            100% { top: 100%; }
         }
 
-        /* 相似度條 */
-        #match-meter-container {
-            width: 80%; height: 30px;
-            background: rgba(255,255,255,0.3);
-            border-radius: 15px;
-            margin-bottom: 50px;
-            position: relative;
-            overflow: hidden;
-            border: 2px solid white;
-        }
-        #match-meter {
-            height: 100%; width: 0%;
-            background: linear-gradient(90deg, #f1c40f, #e67e22);
-            transition: width 0.1s;
-        }
-        #match-text {
-            position: absolute; width: 100%; text-align: center; top: 2px;
-            color: white; font-weight: bold; text-shadow: 1px 1px 2px black;
-        }
-
-        /* 特效動畫 */
-        @keyframes pop {
-            0% { transform: scale(0); opacity: 0; }
-            100% { transform: scale(1); opacity: 1; }
-        }
-        .success-anim { animation: success 0.5s ease-out; }
-        @keyframes success {
-            0% { transform: scale(1); }
-            50% { transform: scale(1.5); }
-            100% { transform: scale(1); }
-        }
-
-        /* 載入遮罩 */
+        /* 載入畫面 */
         #loading {
             position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-            background: #000; color: #fff; z-index: 999;
-            display: flex; justify-content: center; align-items: center; font-size: 20px;
+            background: #000; color: #00ff00;
+            display: flex; flex-direction: column;
+            justify-content: center; align-items: center;
+            z-index: 999;
+        }
+        .loader-bar {
+            width: 200px; height: 4px; background: #333; margin-top: 20px;
+        }
+        .loader-progress {
+            width: 0%; height: 100%; background: #00ff00; transition: width 0.3s;
         }
     </style>
 </head>
 <body>
 
-    <div id="loading">正在載入臉部模型...<br>請允許相機權限</div>
+    <div id="loading">
+        <div style="font-size: 20px; font-weight: bold;">SYSTEM BOOTING...</div>
+        <div style="font-size: 12px; margin-top: 10px;">Downloading Neural Network (Lite0)</div>
+        <div class="loader-bar"><div class="loader-progress" id="progress"></div></div>
+    </div>
 
-    <div id="game-container">
-        <video id="webcam" autoplay playsinline></video>
+    <div id="container">
+        <video id="webcam" autoplay playsinline muted></video>
+        <div id="scan-line"></div>
+        <canvas id="output-canvas"></canvas>
         
-        <div id="ui-layer">
-            <div class="status-bar">
-                <span id="score">得分: 0</span>
-                <span id="timer">時間: 60</span>
-            </div>
-
-            <div id="target-emoji">🤔</div>
-
-            <div id="match-meter-container">
-                <div id="match-meter"></div>
-                <div id="match-text">相似度: 0%</div>
-            </div>
+        <div id="hud-layer">
+            <div class="hud-item">AI MODEL: <span class="hud-value">EfficientDet-Lite0</span></div>
+            <div class="hud-item">DEVICE: <span class="hud-value">GPU/NPU</span></div>
+            <div class="hud-item">INFERENCE: <span class="hud-value" id="fps-display">0 ms</span></div>
+            <div class="hud-item">OBJECTS: <span class="hud-value" id="obj-count">0</span></div>
+            <div class="hud-item" style="margin-top: 10px; color: yellow;">★ 載入完成後請試著斷網</div>
         </div>
     </div>
 
     <script type="module">
-        import { FilesetResolver, FaceLandmarker } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0";
+        import { FilesetResolver, ObjectDetector } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.2";
 
         const video = document.getElementById('webcam');
-        const targetEmojiEl = document.getElementById('target-emoji');
-        const matchMeter = document.getElementById('match-meter');
-        const matchText = document.getElementById('match-text');
-        const scoreEl = document.getElementById('score');
-        const timerEl = document.getElementById('timer');
-        const loadingEl = document.getElementById('loading');
+        const canvas = document.getElementById('output-canvas');
+        const ctx = canvas.getContext('2d');
+        const fpsDisplay = document.getElementById('fps-display');
+        const objCountDisplay = document.getElementById('obj-count');
+        const loadingScreen = document.getElementById('loading');
+        const progressBar = document.getElementById('progress');
 
-        let faceLandmarker;
+        let objectDetector;
+        let runningMode = "VIDEO";
         let lastVideoTime = -1;
-        let score = 0;
-        let timeLeft = 60;
-        let gameActive = false;
-        
-        // 定義關卡 (Emoji 對應的 Blendshape 邏輯)
-        const levels = [
-            { 
-                emoji: "😮", 
-                name: "Surprise", 
-                // 邏輯: 嘴巴張開 + 眉毛抬起
-                check: (shapes) => (shapes["jawOpen"] + shapes["browInnerUp"]) / 2 
-            },
-            { 
-                emoji: "😉", 
-                name: "Wink", 
-                // 邏輯: 左眼閉 (數值高) - 右眼閉 (數值低) 的差值要大，或者反過來
-                check: (shapes) => Math.abs(shapes["eyeBlinkLeft"] - shapes["eyeBlinkRight"]) 
-            },
-            { 
-                emoji: "😁", 
-                name: "Smile", 
-                // 邏輯: 嘴角上揚 (左右平均)
-                check: (shapes) => (shapes["mouthSmileLeft"] + shapes["mouthSmileRight"]) / 2 
-            },
-            { 
-                emoji: "😗", 
-                name: "Kiss", 
-                // 邏輯: 嘴巴嘟起
-                check: (shapes) => shapes["mouthPucker"] 
-            },
-             { 
-                emoji: "😑", 
-                name: "Blink", 
-                // 邏輯: 雙眼閉上
-                check: (shapes) => (shapes["eyeBlinkLeft"] + shapes["eyeBlinkRight"]) / 2 
-            }
-        ];
+        let lastInferenceTime = 0;
 
-        let currentLevel = null;
-        let blendshapesMap = {}; // 儲存當前幀的形狀數值
-
-        // 1. 初始化 AI
-        async function initAI() {
-            const vision = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0/wasm");
-            faceLandmarker = await FaceLandmarker.createFromOptions(vision, {
-                baseOptions: {
-                    modelAssetPath: `https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task`,
-                    delegate: "GPU"
-                },
-                runningMode: "VIDEO",
-                numFaces: 1,
-                outputFaceBlendshapes: true // 關鍵：開啟 Blendshapes 輸出
-            });
-            startCamera();
-        }
-
-        function startCamera() {
-            navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" } }).then((stream) => {
-                video.srcObject = stream;
-                video.addEventListener("loadeddata", () => {
-                    loadingEl.style.display = 'none';
-                    startGame();
-                    predictLoop();
-                });
-            });
-        }
-
-        // 遊戲邏輯
-        function startGame() {
-            gameActive = true;
-            nextLevel();
-            // 倒數計時
-            setInterval(() => {
-                if(timeLeft > 0 && gameActive) {
-                    timeLeft--;
-                    timerEl.innerText = "時間: " + timeLeft;
-                } else if (timeLeft <= 0) {
-                    gameActive = false;
-                    targetEmojiEl.innerText = "🏁";
-                    matchText.innerText = "遊戲結束!";
-                }
-            }, 1000);
-        }
-
-        function nextLevel() {
-            // 隨機選一個表情
-            const idx = Math.floor(Math.random() * levels.length);
-            currentLevel = levels[idx];
-            targetEmojiEl.innerText = currentLevel.emoji;
-            // 重置動畫
-            targetEmojiEl.style.animation = 'none';
-            targetEmojiEl.offsetHeight; /* trigger reflow */
-            targetEmojiEl.style.animation = 'pop 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275)';
-        }
-
-        // 2. AI 預測循環
-        async function predictLoop() {
-            if (lastVideoTime !== video.currentTime && faceLandmarker) {
-                lastVideoTime = video.currentTime;
-                const results = faceLandmarker.detectForVideo(video, performance.now());
-
-                if (results.faceBlendshapes && results.faceBlendshapes.length > 0) {
-                    const shapes = results.faceBlendshapes[0].categories;
-                    
-                    // 將陣列轉為方便查詢的 Object: { "jawOpen": 0.8, ... }
-                    shapes.forEach(s => {
-                        blendshapesMap[s.categoryName] = s.score;
-                    });
-
-                    if (gameActive && currentLevel) {
-                        // 計算當前表情的分數 (0.0 ~ 1.0)
-                        const scoreVal = currentLevel.check(blendshapesMap);
-                        const percentage = Math.min(100, Math.floor(scoreVal * 100));
-
-                        // 更新 UI
-                        matchMeter.style.width = percentage + "%";
-                        matchText.innerText = `相似度: ${percentage}%`;
-
-                        // 判斷是否過關 (閾值設為 0.6，即 60% 像)
-                        if (scoreVal > 0.6) {
-                            handleSuccess();
-                        }
-                    }
-                }
-            }
-            requestAnimationFrame(predictLoop);
-        }
-
-        let isCooldown = false;
-        function handleSuccess() {
-            if (isCooldown) return;
-            isCooldown = true;
+        // 1. 初始化物件偵測模型
+        async function init() {
+            progressBar.style.width = "30%";
             
-            score++;
-            scoreEl.innerText = "得分: " + score;
-            targetEmojiEl.classList.add("success-anim");
-            matchText.innerText = "完美!! ✨";
-            matchMeter.style.background = "#2ed573"; // 變綠色
+            const vision = await FilesetResolver.forVisionTasks(
+                "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.2/wasm"
+            );
+            
+            progressBar.style.width = "60%";
 
-            if (navigator.vibrate) navigator.vibrate(100); // 震動回饋
+            // 下載 EfficientDet 模型 (約 4MB)
+            objectDetector = await ObjectDetector.createFromOptions(vision, {
+                baseOptions: {
+                    modelAssetPath: `https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/float16/1/efficientdet_lite0.tflite`,
+                    delegate: "GPU" // 強制使用 GPU 加速
+                },
+                scoreThreshold: 0.35, // 信心分數門檻 (35% 以上才顯示)
+                runningMode: runningMode
+            });
 
-            setTimeout(() => {
-                matchMeter.style.background = "linear-gradient(90deg, #f1c40f, #e67e22)";
-                targetEmojiEl.classList.remove("success-anim");
-                nextLevel();
-                isCooldown = false;
-            }, 800);
+            progressBar.style.width = "100%";
+            setTimeout(() => { loadingScreen.style.display = 'none'; }, 500);
+            
+            enableCam();
         }
 
-        initAI();
+        // 2. 開啟相機
+        function enableCam() {
+            navigator.mediaDevices.getUserMedia({ 
+                video: { facingMode: "environment" } // 預設使用後鏡頭
+            }).then((stream) => {
+                video.srcObject = stream;
+                video.addEventListener("loadeddata", predictWebcam);
+            });
+        }
+
+        // 3. 預測循環
+        async function predictWebcam() {
+            // 調整 Canvas 尺寸
+            if(canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
+                canvas.width = video.videoWidth;
+                canvas.height = video.videoHeight;
+            }
+
+            let startTimeMs = performance.now();
+
+            if (lastVideoTime !== video.currentTime) {
+                lastVideoTime = video.currentTime;
+                
+                // 核心推論步驟
+                const detections = objectDetector.detectForVideo(video, startTimeMs);
+                
+                // 計算推論時間
+                const inferenceTime = (performance.now() - startTimeMs).toFixed(1);
+                fpsDisplay.innerText = `${inferenceTime} ms`; // 顯示毫秒數
+
+                // 繪製結果
+                displayVideoDetections(detections);
+            }
+
+            window.requestAnimationFrame(predictWebcam);
+        }
+
+        // 繪圖函式
+        function displayVideoDetections(result) {
+            // 清空畫布
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            objCountDisplay.innerText = result.detections.length;
+
+            for (const detection of result.detections) {
+                // 畫框框
+                const box = detection.boundingBox;
+                
+                // 邊框樣式 (科幻風)
+                ctx.lineWidth = 3;
+                ctx.strokeStyle = "#00ff00"; 
+                ctx.beginPath();
+                ctx.rect(box.originX, box.originY, box.width, box.height);
+                ctx.stroke();
+
+                // 角落加粗 (裝飾)
+                drawCorner(box.originX, box.originY); // 左上
+                drawCorner(box.originX + box.width, box.originY); // 右上
+                drawCorner(box.originX, box.originY + box.height); // 左下
+                drawCorner(box.originX + box.width, box.originY + box.height); // 右下
+
+                // 顯示標籤文字 (例如: cup 98%)
+                const category = detection.categories[0];
+                const labelText = `${category.categoryName} ${Math.round(category.score * 100)}%`;
+                
+                ctx.font = "18px Courier New";
+                const textWidth = ctx.measureText(labelText).width;
+
+                // 文字背景
+                ctx.fillStyle = "rgba(0, 255, 0, 0.7)";
+                ctx.fillRect(box.originX, box.originY - 25, textWidth + 10, 25);
+
+                // 文字本體
+                ctx.fillStyle = "black";
+                ctx.fillText(labelText, box.originX + 5, box.originY - 7);
+            }
+        }
+
+        function drawCorner(x, y) {
+            ctx.fillStyle = "#00ff00";
+            ctx.beginPath();
+            ctx.arc(x, y, 4, 0, 2 * Math.PI);
+            ctx.fill();
+        }
+
+        init();
     </script>
 </body>
 </html>

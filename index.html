@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>AI 表情大挑戰</title>
+    <style>
+        body { margin: 0; background: #2c3e50; font-family: 'Segoe UI', sans-serif; overflow: hidden; display: flex; flex-direction: column; align-items: center; }
+        
+        /* 遊戲區域 */
+        #game-container {
+            position: relative;
+            width: 100vw; height: 100vh;
+            overflow: hidden;
+        }
+
+        /* 視訊層 (鏡像) */
+        video {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            object-fit: cover; transform: scaleX(-1);
+        }
+
+        /* UI 層 */
+        #ui-layer {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            pointer-events: none;
+            display: flex; flex-direction: column; align-items: center; justify-content: space-between;
+            padding: 20px 0;
+        }
+
+        /* 目標 Emoji 顯示 */
+        #target-emoji {
+            font-size: 120px;
+            margin-top: 50px;
+            filter: drop-shadow(0 0 20px rgba(0,0,0,0.5));
+            animation: pop 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+        }
+
+        /* 分數與倒數 */
+        .status-bar {
+            background: rgba(0, 0, 0, 0.6);
+            color: white;
+            padding: 10px 30px;
+            border-radius: 50px;
+            font-size: 24px;
+            font-weight: bold;
+            display: flex; gap: 20px;
+            backdrop-filter: blur(5px);
+        }
+
+        /* 相似度條 */
+        #match-meter-container {
+            width: 80%; height: 30px;
+            background: rgba(255,255,255,0.3);
+            border-radius: 15px;
+            margin-bottom: 50px;
+            position: relative;
+            overflow: hidden;
+            border: 2px solid white;
+        }
+        #match-meter {
+            height: 100%; width: 0%;
+            background: linear-gradient(90deg, #f1c40f, #e67e22);
+            transition: width 0.1s;
+        }
+        #match-text {
+            position: absolute; width: 100%; text-align: center; top: 2px;
+            color: white; font-weight: bold; text-shadow: 1px 1px 2px black;
+        }
+
+        /* 特效動畫 */
+        @keyframes pop {
+            0% { transform: scale(0); opacity: 0; }
+            100% { transform: scale(1); opacity: 1; }
+        }
+        .success-anim { animation: success 0.5s ease-out; }
+        @keyframes success {
+            0% { transform: scale(1); }
+            50% { transform: scale(1.5); }
+            100% { transform: scale(1); }
+        }
+
+        /* 載入遮罩 */
+        #loading {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: #000; color: #fff; z-index: 999;
+            display: flex; justify-content: center; align-items: center; font-size: 20px;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="loading">正在載入臉部模型...<br>請允許相機權限</div>
+
+    <div id="game-container">
+        <video id="webcam" autoplay playsinline></video>
+        
+        <div id="ui-layer">
+            <div class="status-bar">
+                <span id="score">得分: 0</span>
+                <span id="timer">時間: 60</span>
+            </div>
+
+            <div id="target-emoji">🤔</div>
+
+            <div id="match-meter-container">
+                <div id="match-meter"></div>
+                <div id="match-text">相似度: 0%</div>
+            </div>
+        </div>
+    </div>
+
+    <script type="module">
+        import { FilesetResolver, FaceLandmarker } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0";
+
+        const video = document.getElementById('webcam');
+        const targetEmojiEl = document.getElementById('target-emoji');
+        const matchMeter = document.getElementById('match-meter');
+        const matchText = document.getElementById('match-text');
+        const scoreEl = document.getElementById('score');
+        const timerEl = document.getElementById('timer');
+        const loadingEl = document.getElementById('loading');
+
+        let faceLandmarker;
+        let lastVideoTime = -1;
+        let score = 0;
+        let timeLeft = 60;
+        let gameActive = false;
+        
+        // 定義關卡 (Emoji 對應的 Blendshape 邏輯)
+        const levels = [
+            { 
+                emoji: "😮", 
+                name: "Surprise", 
+                // 邏輯: 嘴巴張開 + 眉毛抬起
+                check: (shapes) => (shapes["jawOpen"] + shapes["browInnerUp"]) / 2 
+            },
+            { 
+                emoji: "😉", 
+                name: "Wink", 
+                // 邏輯: 左眼閉 (數值高) - 右眼閉 (數值低) 的差值要大，或者反過來
+                check: (shapes) => Math.abs(shapes["eyeBlinkLeft"] - shapes["eyeBlinkRight"]) 
+            },
+            { 
+                emoji: "😁", 
+                name: "Smile", 
+                // 邏輯: 嘴角上揚 (左右平均)
+                check: (shapes) => (shapes["mouthSmileLeft"] + shapes["mouthSmileRight"]) / 2 
+            },
+            { 
+                emoji: "😗", 
+                name: "Kiss", 
+                // 邏輯: 嘴巴嘟起
+                check: (shapes) => shapes["mouthPucker"] 
+            },
+             { 
+                emoji: "😑", 
+                name: "Blink", 
+                // 邏輯: 雙眼閉上
+                check: (shapes) => (shapes["eyeBlinkLeft"] + shapes["eyeBlinkRight"]) / 2 
+            }
+        ];
+
+        let currentLevel = null;
+        let blendshapesMap = {}; // 儲存當前幀的形狀數值
+
+        // 1. 初始化 AI
+        async function initAI() {
+            const vision = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0/wasm");
+            faceLandmarker = await FaceLandmarker.createFromOptions(vision, {
+                baseOptions: {
+                    modelAssetPath: `https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task`,
+                    delegate: "GPU"
+                },
+                runningMode: "VIDEO",
+                numFaces: 1,
+                outputFaceBlendshapes: true // 關鍵：開啟 Blendshapes 輸出
+            });
+            startCamera();
+        }
+
+        function startCamera() {
+            navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" } }).then((stream) => {
+                video.srcObject = stream;
+                video.addEventListener("loadeddata", () => {
+                    loadingEl.style.display = 'none';
+                    startGame();
+                    predictLoop();
+                });
+            });
+        }
+
+        // 遊戲邏輯
+        function startGame() {
+            gameActive = true;
+            nextLevel();
+            // 倒數計時
+            setInterval(() => {
+                if(timeLeft > 0 && gameActive) {
+                    timeLeft--;
+                    timerEl.innerText = "時間: " + timeLeft;
+                } else if (timeLeft <= 0) {
+                    gameActive = false;
+                    targetEmojiEl.innerText = "🏁";
+                    matchText.innerText = "遊戲結束!";
+                }
+            }, 1000);
+        }
+
+        function nextLevel() {
+            // 隨機選一個表情
+            const idx = Math.floor(Math.random() * levels.length);
+            currentLevel = levels[idx];
+            targetEmojiEl.innerText = currentLevel.emoji;
+            // 重置動畫
+            targetEmojiEl.style.animation = 'none';
+            targetEmojiEl.offsetHeight; /* trigger reflow */
+            targetEmojiEl.style.animation = 'pop 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275)';
+        }
+
+        // 2. AI 預測循環
+        async function predictLoop() {
+            if (lastVideoTime !== video.currentTime && faceLandmarker) {
+                lastVideoTime = video.currentTime;
+                const results = faceLandmarker.detectForVideo(video, performance.now());
+
+                if (results.faceBlendshapes && results.faceBlendshapes.length > 0) {
+                    const shapes = results.faceBlendshapes[0].categories;
+                    
+                    // 將陣列轉為方便查詢的 Object: { "jawOpen": 0.8, ... }
+                    shapes.forEach(s => {
+                        blendshapesMap[s.categoryName] = s.score;
+                    });
+
+                    if (gameActive && currentLevel) {
+                        // 計算當前表情的分數 (0.0 ~ 1.0)
+                        const scoreVal = currentLevel.check(blendshapesMap);
+                        const percentage = Math.min(100, Math.floor(scoreVal * 100));
+
+                        // 更新 UI
+                        matchMeter.style.width = percentage + "%";
+                        matchText.innerText = `相似度: ${percentage}%`;
+
+                        // 判斷是否過關 (閾值設為 0.6，即 60% 像)
+                        if (scoreVal > 0.6) {
+                            handleSuccess();
+                        }
+                    }
+                }
+            }
+            requestAnimationFrame(predictLoop);
+        }
+
+        let isCooldown = false;
+        function handleSuccess() {
+            if (isCooldown) return;
+            isCooldown = true;
+            
+            score++;
+            scoreEl.innerText = "得分: " + score;
+            targetEmojiEl.classList.add("success-anim");
+            matchText.innerText = "完美!! ✨";
+            matchMeter.style.background = "#2ed573"; // 變綠色
+
+            if (navigator.vibrate) navigator.vibrate(100); // 震動回饋
+
+            setTimeout(() => {
+                matchMeter.style.background = "linear-gradient(90deg, #f1c40f, #e67e22)";
+                targetEmojiEl.classList.remove("success-anim");
+                nextLevel();
+                isCooldown = false;
+            }, 800);
+        }
+
+        initAI();
+    </script>
+</body>
+</html>

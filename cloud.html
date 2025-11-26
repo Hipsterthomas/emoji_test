@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Cloud AI 體驗版 (模擬)</title>
+    <style>
+        body { margin: 0; background: #f0f2f5; font-family: 'Segoe UI', sans-serif; display: flex; flex-direction: column; align-items: center; }
+        
+        /* 標題區 */
+        header {
+            width: 100%; padding: 15px; background: #4285f4; color: white;
+            text-align: center; box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+        }
+        h1 { margin: 0; font-size: 20px; }
+        p { margin: 5px 0 0; font-size: 12px; opacity: 0.8; }
+
+        /* 視訊預覽區 */
+        #container {
+            position: relative; width: 100%; max-width: 640px; margin-top: 20px;
+        }
+        
+        video {
+            width: 100%; border-radius: 10px; display: block;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.1);
+        }
+
+        /* 繪圖層 (顯示結果) */
+        canvas {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            pointer-events: none; border-radius: 10px;
+        }
+
+        /* 按鈕區 */
+        .controls {
+            margin-top: 20px; display: flex; gap: 10px;
+        }
+
+        button {
+            padding: 15px 30px; font-size: 18px; border: none; border-radius: 50px;
+            background: #4285f4; color: white; cursor: pointer;
+            box-shadow: 0 4px 0 #2a56c6; transition: transform 0.1s;
+            display: flex; align-items: center; gap: 10px;
+        }
+        button:active { transform: translateY(4px); box-shadow: none; }
+        button:disabled { background: #ccc; box-shadow: none; cursor: not-allowed; }
+
+        /* 模擬讀取畫面 (雲端招牌轉圈圈) */
+        #loading-overlay {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.7); border-radius: 10px;
+            display: none; flex-direction: column;
+            justify-content: center; align-items: center; color: white;
+        }
+
+        .spinner {
+            width: 40px; height: 40px; border: 5px solid #fff;
+            border-top: 5px solid transparent; border-radius: 50%;
+            animation: spin 1s linear infinite; margin-bottom: 15px;
+        }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+
+        /* 數據顯示 */
+        #stats {
+            margin-top: 20px; padding: 15px; background: white;
+            border-radius: 8px; width: 90%; max-width: 600px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.05); font-family: monospace;
+        }
+        .stat-row { display: flex; justify-content: space-between; margin-bottom: 5px; }
+        .stat-val { font-weight: bold; color: #4285f4; }
+
+    </style>
+</head>
+<body>
+
+    <header>
+        <h1>☁️ Cloud AI Object Detection</h1>
+        <p>架構：拍照 -> 上傳 -> 雲端運算 -> 回傳結果</p>
+    </header>
+
+    <div id="container">
+        <video id="webcam" autoplay playsinline muted></video>
+        <canvas id="output-canvas"></canvas>
+        
+        <div id="loading-overlay">
+            <div class="spinner"></div>
+            <div id="loading-text">Uploading image...</div>
+        </div>
+    </div>
+
+    <div class="controls">
+        <button id="snap-btn" onclick="captureAndDetect()">
+            <span>📸</span> 拍照並上傳分析
+        </button>
+    </div>
+
+    <div id="stats">
+        <div class="stat-row">狀態: <span id="status-val" class="stat-val">待機</span></div>
+        <div class="stat-row">網路延遲 (Latency): <span id="latency-val" class="stat-val">0 ms</span></div>
+        <div class="stat-row">辨識物件數: <span id="obj-val" class="stat-val">0</span></div>
+    </div>
+
+    <script type="module">
+        import { FilesetResolver, ObjectDetector } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.2";
+
+        const video = document.getElementById('webcam');
+        const canvas = document.getElementById('output-canvas');
+        const ctx = canvas.getContext('2d');
+        const snapBtn = document.getElementById('snap-btn');
+        const loadingOverlay = document.getElementById('loading-overlay');
+        const loadingText = document.getElementById('loading-text');
+        
+        // 狀態顯示
+        const statusVal = document.getElementById('status-val');
+        const latencyVal = document.getElementById('latency-val');
+        const objVal = document.getElementById('obj-val');
+
+        let objectDetector;
+        let runningMode = "IMAGE"; // 注意：這裡改成 IMAGE 模式，模擬單張圖片處理
+
+        // 1. 初始化模型 (雖然是在本地，但我們假裝它是雲端引擎)
+        async function init() {
+            snapBtn.innerText = "系統啟動中...";
+            snapBtn.disabled = true;
+
+            const vision = await FilesetResolver.forVisionTasks(
+                "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.2/wasm"
+            );
+            
+            objectDetector = await ObjectDetector.createFromOptions(vision, {
+                baseOptions: {
+                    modelAssetPath: `https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/float16/1/efficientdet_lite0.tflite`,
+                    delegate: "GPU"
+                },
+                scoreThreshold: 0.35,
+                runningMode: runningMode
+            });
+
+            snapBtn.innerText = "📸 拍照並上傳分析";
+            snapBtn.disabled = false;
+            
+            // 開啟相機
+            navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } }).then((stream) => {
+                video.srcObject = stream;
+            });
+        }
+
+        // 2. 模擬雲端流程 (核心教學邏輯)
+        window.captureAndDetect = async function() {
+            if (!objectDetector) return;
+
+            // --- 步驟 A: 凍結畫面 (模擬拍照) ---
+            video.pause();
+            snapBtn.disabled = true;
+            ctx.clearRect(0, 0, canvas.width, canvas.height); // 清空舊的框
+            
+            // --- 步驟 B: 模擬上傳延遲 (Network Latency) ---
+            loadingOverlay.style.display = 'flex';
+            statusVal.innerText = "上傳圖片中...";
+            loadingText.innerText = "Uploading to server (1.2MB)...";
+            
+            let startTime = performance.now();
+
+            // 隨機延遲 1.5秒 ~ 3秒 (模擬 4G 訊號)
+            const fakeNetworkLag = 1500 + Math.random() * 1500;
+            
+            await new Promise(resolve => setTimeout(resolve, fakeNetworkLag * 0.6)); // 上傳時間
+            
+            statusVal.innerText = "雲端 GPU 運算中...";
+            loadingText.innerText = "Processing on Cloud GPU...";
+            
+            await new Promise(resolve => setTimeout(resolve, fakeNetworkLag * 0.4)); // 運算與回傳時間
+
+            // --- 步驟 C: 執行辨識 (這裡其實還是 Local 跑的，但學生感覺不出來) ---
+            // 確保 canvas 尺寸正確
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            
+            const detections = objectDetector.detect(video); // 使用 detect (單張) 而非 detectForVideo (串流)
+            
+            // --- 步驟 D: 顯示結果 ---
+            loadingOverlay.style.display = 'none';
+            displayImageDetections(detections);
+            
+            let endTime = performance.now();
+            let totalLatency = (endTime - startTime).toFixed(0);
+
+            // 更新數據 UI
+            statusVal.innerText = "接收回傳資料成功";
+            latencyVal.innerText = `${totalLatency} ms`;
+            latencyVal.style.color = "red"; // 紅色強調延遲很高
+            objVal.innerText = detections.detections.length;
+
+            snapBtn.innerText = "🔄 重設 / 再拍一張";
+            snapBtn.onclick = resetCamera;
+            snapBtn.disabled = false;
+        }
+
+        function resetCamera() {
+            video.play(); // 恢復相機畫面
+            ctx.clearRect(0, 0, canvas.width, canvas.height); // 清掉框框
+            statusVal.innerText = "待機";
+            latencyVal.innerText = "0 ms";
+            objVal.innerText = "0";
+            
+            snapBtn.innerText = "📸 拍照並上傳分析";
+            snapBtn.onclick = window.captureAndDetect;
+        }
+
+        function displayImageDetections(result) {
+            for (const detection of result.detections) {
+                const box = detection.boundingBox;
+                
+                // 畫框
+                ctx.lineWidth = 4;
+                ctx.strokeStyle = "#4285f4"; // 使用 Google 藍，區別於 Edge 的綠色
+                ctx.beginPath();
+                ctx.rect(box.originX, box.originY, box.width, box.height);
+                ctx.stroke();
+
+                // 畫標籤
+                const category = detection.categories[0];
+                const labelText = `${category.categoryName} ${Math.round(category.score * 100)}%`;
+                
+                ctx.font = "16px Arial";
+                ctx.fillStyle = "#4285f4";
+                const textWidth = ctx.measureText(labelText).width;
+                ctx.fillRect(box.originX, box.originY - 25, textWidth + 10, 25);
+
+                ctx.fillStyle = "white";
+                ctx.fillText(labelText, box.originX + 5, box.originY - 7);
+            }
+        }
+
+        init();
+    </script>
+</body>
+</html>
